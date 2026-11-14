@@ -31,7 +31,10 @@ final class EntropyTest extends TestCase
     {
         $size = strlen($section) + 1;
         $bh = ($size << 3) | (2 << 1) | 1;
-        return "\x28\xB5\x2F\xFD\xA0" . pack('V', $n) . chr($bh & 0xFF) . chr(($bh >> 8) & 0xFF) . chr(($bh >> 16) & 0xFF) . $section . "\x00";
+        // Not single segment: a 2 MiB window (descriptor 0x58) with a 4-byte content size. A single-segment frame's window is its
+        // content size, and RFC 8878 limits a block to the window, so a block of raw literals (larger than its content) would be invalid there;
+        // zstd 1.5.5 accepted that, 1.5.7 rejects it ("Src size is incorrect").
+        return "\x28\xB5\x2F\xFD\x80\x58" . pack('V', $n) . chr($bh & 0xFF) . chr(($bh >> 8) & 0xFF) . chr(($bh >> 16) & 0xFF) . $section . "\x00";
     }
 
     private function assertDecodes(string $lit, string $section, string $label): void
