@@ -4,12 +4,11 @@ declare(strict_types=1);
 
 namespace Charm\Zstd\Tests;
 
-use Charm\Zstd\DecodeException;
 use Charm\Zstd\Zstd;
 use PHPUnit\Framework\TestCase;
 
 /**
- * Damaged frames (fixed seeds): truncations and bit flips. The only allowed outcomes are DecodeException, or a returned string;
+ * Damaged frames (fixed seeds): truncations and bit flips. The only allowed outcomes are \UnexpectedValueException, or a returned string;
  * and when the frame has a checksum, a returned string must be the original (a changed frame never yields wrong bytes).
  */
 final class CorruptionTest extends TestCase
@@ -71,7 +70,7 @@ final class CorruptionTest extends TestCase
                 try {
                     $out = Zstd::decompress(substr($zst, 0, $n));
                     $this->fail("frame $f cut to $n of " . strlen($zst) . ' bytes decoded (to ' . strlen($out) . ' bytes)');
-                } catch (DecodeException) {
+                } catch (\UnexpectedValueException) {
                     $this->addToAssertionCount(1);
                 }
             }
@@ -91,7 +90,7 @@ final class CorruptionTest extends TestCase
                 $c[$i] = chr(ord($c[$i]) ^ (1 << $bit));
                 try {
                     $this->assertTrue($plain === Zstd::decompress($c), "flipping bit $bit of byte $i returned wrong bytes");
-                } catch (DecodeException) {
+                } catch (\UnexpectedValueException) {
                     $threw++;
                 }
             }
@@ -108,7 +107,7 @@ final class CorruptionTest extends TestCase
                 $c[$i] = chr(ord($c[$i]) ^ (1 << $bit));
                 try {
                     Zstd::decompress($c);
-                } catch (DecodeException) {
+                } catch (\UnexpectedValueException) {
                 }
                 $this->addToAssertionCount(1);
             }
@@ -134,7 +133,7 @@ final class CorruptionTest extends TestCase
             }
             try {
                 $r = Zstd::decompress($c);
-            } catch (DecodeException) {
+            } catch (\UnexpectedValueException) {
                 $threw++;
                 continue;
             }

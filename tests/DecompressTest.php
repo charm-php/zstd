@@ -4,7 +4,6 @@ declare(strict_types=1);
 
 namespace Charm\Zstd\Tests;
 
-use Charm\Zstd\DecodeException;
 use Charm\Zstd\Zstd;
 use PHPUnit\Framework\TestCase;
 
@@ -15,7 +14,7 @@ final class DecompressTest extends TestCase
 
     public function testDecodeExceptionIsARuntimeException(): void
     {
-        $this->assertInstanceOf(\RuntimeException::class, new DecodeException());
+        $this->assertInstanceOf(\RuntimeException::class, new \UnexpectedValueException());
     }
 
     public function testEmptyFrame(): void
@@ -80,7 +79,7 @@ final class DecompressTest extends TestCase
     #[\PHPUnit\Framework\Attributes\DataProvider('badInputs')]
     public function testBadInputThrowsDecodeException(string $input): void
     {
-        $this->expectException(DecodeException::class);
+        $this->expectException(\UnexpectedValueException::class);
         Zstd::decompress($input);
     }
 
@@ -88,7 +87,7 @@ final class DecompressTest extends TestCase
     {
         $sum = substr(strrev(hash('xxh64', 'hello', true)), 0, 4);
         $this->assertSame('hello', Zstd::decompress(self::MAGIC . "\x24\x05\x29\x00\x00hello" . $sum));
-        $this->expectException(DecodeException::class);
+        $this->expectException(\UnexpectedValueException::class);
         $this->expectExceptionMessageMatches('/checksum/');
         Zstd::decompress(self::MAGIC . "\x24\x05\x29\x00\x00hellp" . $sum);
     }
@@ -96,7 +95,7 @@ final class DecompressTest extends TestCase
     public function testFrameThatNeedsADictionary(): void
     {
         // single segment + 1-byte dictionary id (5) + 1-byte content size 0 + an empty last raw block
-        $this->expectException(DecodeException::class);
+        $this->expectException(\UnexpectedValueException::class);
         $this->expectExceptionMessageMatches('/dictionary/');
         Zstd::decompress(self::MAGIC . "\x21\x05\x00\x01\x00\x00");
     }
@@ -108,13 +107,13 @@ final class DecompressTest extends TestCase
 
     public function testFourByteDictionaryId(): void
     {
-        $this->expectException(DecodeException::class);
+        $this->expectException(\UnexpectedValueException::class);
         Zstd::decompress(self::MAGIC . "\x23\x01\x02\x03\x04\x00\x01\x00\x00");
     }
 
     public function testNegativeMaxSizeIsAProgrammingError(): void
     {
-        $this->expectException(\InvalidArgumentException::class);
+        $this->expectException(\ValueError::class);
         Zstd::decompress(self::MAGIC . "\x20\x00\x01\x00\x00", -1);
     }
 
@@ -129,7 +128,7 @@ final class DecompressTest extends TestCase
             foreach (self::badInputs() as [$input]) {
                 try {
                     Zstd::decompress($input);
-                } catch (DecodeException) {
+                } catch (\UnexpectedValueException) {
                 }
             }
         } finally {
@@ -145,7 +144,7 @@ final class DecompressTest extends TestCase
         try {
             try {
                 Zstd::decompress('garbage');
-            } catch (DecodeException) {
+            } catch (\UnexpectedValueException) {
             }
             $this->assertSame($mine, set_error_handler(static fn (): bool => true));
             restore_error_handler();

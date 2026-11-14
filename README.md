@@ -4,7 +4,8 @@ A Zstandard ([RFC 8878](https://www.rfc-editor.org/rfc/rfc8878)) decoder and a c
 dependencies, no extension). It exists for places where `ext-zstd` is not installed, for example reading Parquet files.
 
 The decoder reads every frame that the reference compressor (`zstd`, tested with v1.5.5) writes without a dictionary, and
-verifies content checksums. It takes an optional output limit, so that untrusted input cannot expand without bound. The
+verifies content checksums. It takes an optional output limit, so that untrusted input cannot expand without bound. A streaming `Decoder` and
+`Encoder` take their input in chunks of any size (`decode()` / `encode()` / `finish()`, the shape of charm/jsonl and charm/csv). The
 compressor is a single-pass one with Huffman-coded literals and FSE-coded sequence tables: its output is valid for every decoder and
 its size is within 0 to 25 percent of `zstd -1` on the inputs measured below (see Compression).
 
@@ -16,7 +17,7 @@ composer require charm/zstd
 
 <!-- example: usage -->
 ```php
-use Charm\Zstd\{DecodeException, Zstd};
+use Charm\Zstd\Zstd;
 
 $zst = Zstd::compress($data);
 $data = Zstd::decompress($zst);
@@ -24,9 +25,33 @@ $data = Zstd::decompress($zst);
 // Untrusted input whose size you know (a Parquet page, for example): refuse to produce more than that
 try {
     $page = Zstd::decompress($compressedPage, maxSize: $uncompressedSize);
-} catch (DecodeException $e) {
+} catch (\UnexpectedValueException $e) {
     // corrupt or truncated data, checksum mismatch, a dictionary frame, or more output than $uncompressedSize
 }
+```
+
+Streaming: read, decode, and call `finish()` at the end; encode with a `fwrite()` loop.
+
+<!-- example: streaming -->
+```php
+use Charm\Zstd\{Decoder, Encoder};
+
+// Decode a stream
+$decoder = new Decoder();
+$h = fopen('data.zst', 'rb');
+while (!feof($h)) {
+    echo $decoder->decode(fread($h, 65536));   // the output of the blocks this chunk completed (possibly '')
+}
+echo $decoder->finish();                       // throws if the stream is incomplete
+
+// Encode to a stream
+$encoder = new Encoder();
+$out = fopen('copy.zst', 'wb');
+$in = fopen('data.zst.plain', 'rb');
+while (!feof($in)) {
+    fwrite($out, $encoder->encode(fread($in, 65536)));
+}
+fwrite($out, $encoder->finish());              // the last block and the checksum
 ```
 
 ## API
@@ -40,7 +65,20 @@ final class Zstd
     public static function decompress(string $data, ?int $maxSize = null): string;
 }
 
-final class DecodeException extends \RuntimeException {}
+final class Decoder
+{
+    public function __construct(?int $maxSize = null);
+    public function decode(string $chunk): string;     // the output the chunk completed
+    public function finish(): string;                  // end of input: throws if incomplete; resets the decoder
+}
+
+final class Encoder
+{
+    public function __construct();
+    public function encode(string $chunk): string;     // the compressed bytes that became final
+    public function flush(): string;                   // ends the current block: a Decoder can output everything given so far
+    public function finish(): string;                  // ends the stream; resets the encoder
+}
 ```
 
 * `compress()` returns one frame (single segment, with the content size in the header, no checksum), Huffman-coded literals and FSE-coded sequence tables chosen per block by size (see Compression). The empty string
@@ -48,28 +86,42 @@ final class DecodeException extends \RuntimeException {}
   candidates and are verified before use).
 * `decompress()` accepts one frame or several concatenated frames, and skippable frames (which are skipped). It returns
   the concatenated content. The empty string is not valid input; a frame with empty content returns `''`.
-* `$maxSize`: if not null, decoding throws `DecodeException` when the output would exceed that many bytes. It is checked
+* `$maxSize`: if not null, decoding throws `\UnexpectedValueException` when the output would exceed that many bytes. It is checked
   when a frame header declares a content size larger than what is left of the limit (before any decoding), and once per
   block while decoding. A block produces at most 128 KiB, so the output held when the exception is thrown exceeds
   `$maxSize` by at most one block (128 KiB), however large the declared or real output is. The limit applies to the total
-  over all frames. A negative `$maxSize` throws `\InvalidArgumentException` (a programming error, not bad input).
-* `DecodeException` is the only exception thrown for any failure caused by the input: bad magic, truncated or corrupt data,
-  a content checksum that does not match, a frame that needs a dictionary, output above `$maxSize`. PHP warnings and
-  errors raised while decoding corrupt bytes are converted to it as well (the previous exception is attached when there is
-  one), and the caller's error handler is not called for them. Out-of-memory from a huge but legal frame without a
-  `$maxSize` is not something PHP can turn into an exception.
+  over all frames. A negative `$maxSize` throws `\ValueError` (a programming error, not bad input).
+* `Decoder` takes input in chunks of any size and alignment (1 byte, empty, cut inside a block header) and returns the output that became available.
+  `Decoder(maxSize:)` has the semantics of `decompress($data, $maxSize)` over the whole stream.
+* `Encoder` writes one frame without a content size, with a 128 KiB window, blocks of 128 KiB and a content checksum.
+* **Chunking never changes the result.** For every split of a valid stream, the `decode()` results joined with `finish()` equal `decompress()`; for every invalid
+  stream the `Decoder` throws (in `decode()` or in `finish()`) exactly when `decompress()` does. `Encoder` without `flush()` writes the same bytes
+  whatever the chunking of its input.
+* **Granularity.** A `Decoder` holds the input until a whole block (at most 128 KiB) is present, then decodes it and returns its output: output arrives a block at
+  a time, and `decode()` returns `''` for a chunk that completes no block. Skippable frames are skipped without being held. An `Encoder` compresses a block as soon as 128 KiB are pending,
+  so `encode()` returns `''` until then; `flush()` compresses the pending input as a block of its own (a smaller block: flushing after every small chunk costs ratio).
+* **Memory.** A `Decoder` keeps the window of the frame (its `Window_Size`, or the content size of a single-segment frame), trimmed in large steps (at least 1 MiB or half a window), plus the block being received:
+  not the whole output. An `Encoder` keeps the last 128 KiB it compressed and the pending input, at most about 2.3 MiB in all.
+* `finish()` ends the input. `Decoder::finish()` throws if the stream is incomplete (no input at all is incomplete, as for `decompress('')`); both reset the object for another stream.
+* After an exception from a `Decoder`, discard it.
+
+## Errors
+
+Misuse throws PHP's own `\ValueError` (a negative `$maxSize`). Bad input throws `\UnexpectedValueException` with a message naming Zstandard: bad magic,
+truncated or corrupt data, a content checksum that does not match, a frame that needs a dictionary, a match that reaches back beyond the window, output above `$maxSize`.
+There is no exception class of this package, so `catch (\UnexpectedValueException)` catches a data error from any charm package. PHP warnings and errors raised while decoding corrupt bytes are converted to it as well (the previous exception is attached when there is
+one), and the caller's error handler is not called for them. Out-of-memory from a huge but legal frame without a `$maxSize` is not something PHP can turn into an exception.
 
 ## What is supported
 
 Decoder: raw, RLE and compressed blocks; raw, RLE, Huffman and treeless literals (1 and 4 streams); predefined, RLE, FSE and
 repeat sequence tables; content checksums (XXH64, verified); the content size field (checked against the output);
-concatenated frames; skippable frames. The window size is not enforced (the whole output is kept in memory anyway), so
-frames made with `--long=27` or `--ultra -22` decode like any other.
+concatenated frames; skippable frames. The window size limits only how far a match may reach back (see Limitations): frames made with
+`--long=27` or `--ultra -22` decode like any other, and no limit is put on the window size itself.
 
 Not supported:
 
-* Dictionaries. A frame with a non-zero dictionary id throws `DecodeException`.
-* Streaming: the input and the output are strings held in memory.
+* Dictionaries. A frame with a non-zero dictionary id throws `\UnexpectedValueException`.
 * The compressor is a fast one: a single hash table for 4-byte matches (16,384 entries), one repeat offset checked, no lazy matching, no
   treeless (repeated) Huffman tables or repeat sequence tables, always one frame with no checksum and no dictionary. Its size is
   about 10 percent above `zstd -1` on text and 20 percent on numbers and indices, and it never reaches `zstd -3` (see Compression).
@@ -131,6 +183,15 @@ php bench/run.php                      # --runs=3 for a quick run
 which runs `bench/bench.php` with `-d opcache.jit_buffer_size=128M -d opcache.jit=1255` and again with
 `-d opcache.jit_buffer_size=0`. Without the `zstd` tool the reference-frame rows are skipped.
 
+### Streaming
+
+`Decoder` fed 64 KiB chunks and `Encoder` fed 64 KiB chunks, from the same run (best of 5, PHP 8.3.36, tracing JIT; without the JIT in parentheses; the machine was busy, so differences below 10% are noise). The `Decoder` is
+within 1-3% of `decompress()` on the same frame on every input but one: the source text, whose `zstd -3` frame has a ratio of 8 and many sequences per block, takes 296 MB/s (100) against 365 (108), 19% (8%) slower.
+Streaming decoding of `Zstd::compress()` output: 247 vs 249 MB/s on the source text, 120 vs 121 on the PHP binary, 111 vs 114 on the words, 88 vs 88 on the digits. The `Encoder` writes the same sizes as
+`compress()` (ratio 5.71, 2.37, 2.30, 1.92 and 1.08 on the five inputs, the same to two decimals) at the same speed (55 vs 53 MB/s on the source text, 21 vs 21 on the binary; 13 to 26 MB/s without the JIT), and `decompress()` reads its streams as fast as
+`compress()`'s (247 vs 249 MB/s on the source text). `decompress()` itself was measured before and after this change, back to back: within 2% on every row with the JIT, and within 1-2% without it in a separate 25-run test (the extra
+window check costs nothing visible).
+
 ## Compression
 
 `compress()` splits the input into blocks of up to 128 KiB. For each block it finds matches with a hash table of 4-byte sequences (and the
@@ -170,18 +231,28 @@ on the int64 pages it is faster, because the output is half the size. A 64K-entr
 ## Limitations
 
 * Pure PHP: 1.3-17x slower than native `gzdecode()` on the same data (table above), and much slower than `ext-zstd` (not measured here: the extension is not installed on the test machine).
-* No dictionaries, no streaming, no window-size limit; the whole input and output live in memory. Use `$maxSize` for untrusted input.
-* **PHP 8.4 and 8.5 with the tracing JIT** (`opcache.jit=tracing`, the default JIT mode): the JIT miscompiles the
-  decoder's bitstream refill loops, so earlier versions of this library threw "Corrupted Zstandard sequence" on valid
-  frames there. This is a PHP JIT bug, fixed on php-src master (8.7) by its IR update for dstogov/ir GH-302 but
-  not in 8.4 to 8.6 as of November 2026. On PHP 8.4 and later the decoder refills
-  with one 8-byte read instead of a loop. That is correct with every JIT setting, but 8.4/8.5's tracing JIT then fails
-  to compile the decoder's main loop and runs it in the interpreter: decoding there is about as fast as without the JIT,
-  44-81 MB/s, against 230-340 MB/s with PHP 8.3's tracing JIT (1 MB of text, `zstd -1` to `-19` frames). PHP 8.3 keeps
-  the loop and is not affected. `tests/TracingJitTest.php` decodes in a child process with the tracing JIT on.
+* No dictionaries, and no limit on the window size: a frame may declare a 3.75 TB window, and `Decoder` then holds as much output as the frame produces (use `$maxSize` for untrusted input). `decompress()` keeps the whole input and output in memory.
+* **PHP 8.4 and 8.5 with the tracing JIT** (`opcache.jit=tracing`, the default JIT mode; 8.6 and later were not tested): the JIT miscompiles code
+  of this library in two ways, and this library works around both.
+  * *The sequence loop of the block decoder* (`Engine::decodeBlock()`). The trace of the loop is compiled after about 60 iterations (`opcache.jit_hot_loop`),
+  and the compiled loop then computes a wrong FSE state, so a frame fails with "Corrupted Zstandard sequence" or decodes to wrong bytes. It depends on the data: 100 KB of machine code
+  (the PHP binary) at `zstd -1` or `-3` failed; 2 MB of generated text, binary tables and the fuzzer's small inputs did not. An earlier version of this README said that
+  the refill loops were the problem and that reading 8 bytes at a time avoided it; that held only for small frames (the tests then only had small ones). What is known: it happens with `opcache.jit=1253` and above (the optimisation levels that use type inference), not with
+  `jit=function`, `1205` or `1252`; the first state that differs is in the iteration where the compiled trace starts (the 62nd sequence of the first block of the failing frame); the failure stays when the refill expression is rewritten (7-byte reads, other masks), and
+  restructuring the refill branches changed whether it failed (one variant decoded the test frames on 8.5 and failed on 8.4), so no shape of the source was found that is safely free of it. It is not the loop's
+  arithmetic or the side exits (it happens with `opcache.jit_max_side_traces=0`). The IR of the failing trace was not analysed further. PHP 8.3 is not affected, and PHP master (8.7), where an update of the JIT's IR library
+  (dstogov/ir GH-302) landed, was not tested.
+  *Workaround:* on PHP 8.4 and later `Engine::init()` calls `opcache_jit_blacklist()` for `decodeBlock()`, so the JIT never compiles that function (nothing changes without opcache: no JIT, no function).
+  Everything else is still compiled, notably the Huffman literal decoders. The cost: on 8.4/8.5 decoding runs at about 20-110 MB/s
+  (the tables above, which are 8.3's, are 3-4x faster on these inputs: 8.3's tracing JIT compiles the loop correctly, 133-360 MB/s) and at 160-180 MB/s on the two
+  Huffman-heavy frames of the digits input.
+  * *Assigning to the array that a `foreach` iterates over* (the Huffman code length limiting in the compressor did: `$lens[$s] = $limit` in `foreach ($lens as $s => $l)`). The JIT keeps writing to the
+  array the loop started with, the assignment is lost and the output frame has an invalid Huffman tree. Found by the fuzzer with large inputs; `Zstd::compress()` and the `Encoder` iterate over another array now. Nothing else in the library does this.
+* `tests/TracingJitTest.php` runs child processes with the tracing JIT on: a 56 KB block of machine code that failed (`tests/fixtures/jit-block.zst`), 5.5 MB of data (the first 3 MB of the PHP binary, generated text and skewed bytes) compressed by the tool at five settings, by `compress()` and by the `Encoder` and decoded by `decompress()` and the `Decoder`, and 600 skewed inputs for the
+  Huffman length limiting. Both big tests fail on 0.1.0-RC1 on PHP 8.4 and 8.5. `php tests/tools/fuzz.php --big=100` adds large machine-code cases to the fuzzer; it found the second bug.
 * The compressor's ratio is below the real tool's: 9 percent above `zstd -1` on text, 20 percent on digits and dictionary indices, equal on int64 pages and binary, and 16 to 25 percent above `zstd -3` on text (see Compression). The older Performance tables above were measured with the previous, weaker compressor (ratios 4.43 on the source text, 1.97 on the PHP binary, 1.66 on words) and are kept for the decoder rows.
 * Only compatible with what was tested: frames from `zstd` 1.5.5 at the settings listed under Tests. Other encoders' frames should decode if they follow the RFC, but none were tested.
-* The window size and the format's checks that depend on it (for example, an offset larger than the window) are not enforced; a match offset is only checked against the output produced so far.
+* A match offset larger than the frame's window (or than the output produced so far) is rejected, as RFC 8878 requires and as the streaming `Decoder`, which keeps only the window, needs. A block larger than `min(Window_Size, 128 KiB)` is not rejected.
 
 ## Tests
 
@@ -202,15 +273,17 @@ vendor/bin/phpunit
   symbols above 128 (the FSE-compressed tree), a long tail of weights, literal sections of 31 to 131,072 bytes around every size-format boundary (each checks the format and the regenerated size in the header),
   a block of literals only and one of exactly 128 KiB, tables chosen per block (predefined, RLE, FSE), normalised counts; each decoded here and by `zstd -d`. `tests/fixtures/ours-*.zst` are the compressor's own output
   (accepted by `zstd -d` when written), so the tests that do not run the tool still decode it.
-* `php tests/tools/fuzz.php`: random inputs (size 0 to 300,000, alphabets of 1 to 256 symbols, skew, copies from anywhere earlier, runs, noise) through `compress()`, each decoded by this decoder and by `zstd -d`: 20,000 cases per seed, fixed seeds, 0 failures for seeds 1 and 2
-  (40,000 cases, 779 MB in).
+* `php tests/tools/fuzz.php` (modes `oneshot,encoder,decoder,damage`; `--modes=oneshot` for the compressor alone): random inputs (size 0 to 300,000, alphabets of 1 to 256 symbols, skew, copies from anywhere earlier, runs, noise) through `compress()`, each decoded by this decoder and by `zstd -d`: 20,000 cases per seed, fixed seeds, 0 failures for seeds 1 and 2
+  (40,000 cases, 779 MB in). With the streaming modes (the same inputs through `Encoder` with about 200 `flush()` calls per case, `Decoder` over random chunks, 2,500 frames of the tool at levels -5 to 19 per seed, and 22,000 truncated or damaged frames per seed that the `Decoder` must reject exactly when `decompress()` does), also 0 failures for seeds 1 and 2, on PHP 8.5 and on PHP 8.3, both with the tracing JIT.
 * Fault injection: 16 faults in the new encoder code (streams written in the wrong order, a wrong canonical code, swapped jump table sizes, a wrong segment size, a size-format threshold, the direct weight packing, a 12-bit limit, a zero normalised count, the long form of a count, a wrong accuracy log for a final state, swapped modes,
   the entropy gate, an RLE table symbol, a missing zero sequence count, the order of the two weight states, no Kraft repair after limiting): each is caught by a named test (`EntropyTest`, `CliTest`, `CompressTest`, `StateTest`).
-* `ReadmeExamplesTest`: the README's PHP example is run, and its signature listing is compared with the class by reflection.
+* `ReadmeExamplesTest`: the README's PHP examples (one-shot and streaming) are run, and its signature listing is compared with the classes by reflection.
+* `DecoderTest`: every fixture through the `Decoder` with six split patterns (1 byte, 64 KiB, seeded random sizes, 1-9 bytes, one chunk, empty chunks interleaved), compared with `decompress()`; truncated and damaged frames through random splits throw exactly when `decompress()` does; `$maxSize` (exact, one byte less, across frames, a bomb fed in small chunks); a 70 MiB stream and a 66 MiB stream with long matches decoded in 2 KiB / 64 KiB chunks with a peak memory of a few MiB; an offset beyond the window.
+* `EncoderTest`: the stream through `decompress()`, the `Decoder` and `zstd -d` for all 86 inputs; the same bytes for every chunking; `flush()` at random points (a `Decoder` has all the input given so far); `finish()` reuse; empty input; matches at distances up to the 128 KiB window; ratio against `compress()`.
 * `CompressTest`, `StateTest`: round trips, and 400 interleaved compressions in one process (the static hash table), each
   frame checked by our decoder and, when available, `zstd -d`.
 * `CorruptionTest`: truncations and bit flips with fixed seeds, with and without checksum, plus every truncation and every
-  single-bit flip of two small frames. The only outcomes allowed are `DecodeException` or a returned string, with a
+  single-bit flip of two small frames. The only outcomes allowed are `\UnexpectedValueException` or a returned string, with a
   checksum that string must be the original; a PHP warning fails the test.
 * `MaxSizeTest`: exact size passes and one byte less throws for frames with and without content size and for
   concatenated frames; a declared size above the limit is refused before decoding; a 64 MiB bomb of RLE blocks and one of 64 compressed

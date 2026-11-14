@@ -4,7 +4,7 @@ declare(strict_types=1);
 
 /**
  * Benchmarks charm/zstd: decoding at zstd levels 1, 3 and 19 (when the zstd tool is on PATH), the package's own compressor,
- * and native gzdecode() on the same data as a reference. Run it through run.php, which starts this script with and without the JIT:
+ * the streaming Decoder (64 KiB chunks) and Encoder (64 KiB chunks), and native gzdecode() on the same data as a reference. Run it through run.php, which starts this script with and without the JIT:
  *
  *     php bench/run.php
  *
@@ -13,7 +13,7 @@ declare(strict_types=1);
  * The inputs are built here from fixed seeds (nothing is downloaded) except the PHP binary, which is whatever php this is run with; they are written to bench/data/ (git-ignored) for the zstd tool.
  */
 
-use Charm\Zstd\Zstd;
+use Charm\Zstd\{Decoder, Encoder, Zstd};
 
 require __DIR__ . '/../vendor/autoload.php';
 
@@ -127,6 +127,31 @@ function skewed(): string
     return $out;
 }
 
+/** The streaming decoder over 64 KiB chunks: the bytes it returned (the output is counted, not collected, in the timed runs). */
+function streamDecode(string $z, bool $collect = false): string|int
+{
+    $d = new Decoder();
+    $n = 0;
+    $out = '';
+    for ($p = 0, $len = strlen($z); $p < $len; $p += 65536) {
+        $r = $d->decode(substr($z, $p, 65536));
+        $collect ? $out .= $r : $n += strlen($r);
+    }
+    $r = $d->finish();
+    return $collect ? $out . $r : $n + strlen($r);
+}
+
+function streamEncode(string $in): string
+{
+    $e = new Encoder();
+    $out = [];
+    for ($p = 0, $len = strlen($in); $p < $len; $p += 65536) {
+        $out[] = $e->encode(substr($in, $p, 65536));
+    }
+    $out[] = $e->finish();
+    return implode('', $out);
+}
+
 $inputs = [
     'source text' => sourceText(),
     'PHP binary (first 6 MiB)' => (string) file_get_contents(PHP_BINARY, false, null, 0, 6 << 20),
@@ -140,7 +165,7 @@ $cli = false;
 $cli = $code === 0;
 
 printf("PHP %s, JIT %s, zstd tool: %s\n", PHP_VERSION, ini_get('opcache.jit_buffer_size') === '0' || ini_get('opcache.jit_buffer_size') === '' ? 'off' : 'on (' . ini_get('opcache.jit') . ')', $cli ? trim((string) shell_exec('zstd --version 2>&1')) : 'not found (zstd levels skipped)');
-echo "Decoding is checked against the original on every measured frame.\n\n";
+echo "Decoding is checked against the original on every measured frame (the streaming paths too).\n\n";
 
 printf("%-42s | %-34s | %9s | %7s\n", 'input', 'operation', 'MB/s', 'ratio');
 printf("%'-42s-+-%'-34s-+-%'-9s-+-%'-7s\n", '', '', '', '');
@@ -162,6 +187,9 @@ foreach ($inputs as $name => $in) {
                 exit(1);
             }
             $row($label, "decode `zstd $lv` output", $mb / best(fn () => Zstd::decompress($z), $runs), sprintf('%.2f', $n / strlen($z)));
+            if ($lv === '-3') {
+                $row($label, 'Decoder, 64 KiB chunks, `zstd -3`', $mb / best(fn () => streamDecode($z), $runs), sprintf('%.2f', $n / strlen($z)));
+            }
         }
         @unlink($file);
     }
@@ -174,5 +202,18 @@ foreach ($inputs as $name => $in) {
     }
     $row($label, 'Zstd::compress()', $mb / best(fn () => Zstd::compress($in), min($runs, 3)), sprintf('%.2f', $n / strlen($z)));
     $row($label, 'decode Zstd::compress() output', $mb / best(fn () => Zstd::decompress($z), $runs), sprintf('%.2f', $n / strlen($z)));
+    if (streamDecode($z, true) !== $in) {
+        fwrite(STDERR, "streaming decode mismatch ($name)\n");
+        exit(1);
+    }
+    $row($label, 'Decoder, 64 KiB chunks, same frame', $mb / best(fn () => streamDecode($z), $runs), sprintf('%.2f', $n / strlen($z)));
+    $zs = streamEncode($in);
+    if (Zstd::decompress($zs) !== $in || streamDecode($zs, true) !== $in) {
+        fwrite(STDERR, "stream round trip mismatch ($name)\n");
+        exit(1);
+    }
+    $row($label, 'Encoder, 64 KiB chunks', $mb / best(fn () => streamEncode($in), min($runs, 3)), sprintf('%.2f', $n / strlen($zs)));
+    $row($label, 'decompress() of the Encoder stream', $mb / best(fn () => Zstd::decompress($zs), $runs), sprintf('%.2f', $n / strlen($zs)));
+    $row($label, 'Decoder, 64 KiB chunks, Encoder stream', $mb / best(fn () => streamDecode($zs), $runs), sprintf('%.2f', $n / strlen($zs)));
     echo "\n";
 }

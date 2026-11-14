@@ -4,7 +4,6 @@ declare(strict_types=1);
 
 namespace Charm\Zstd\Tests;
 
-use Charm\Zstd\DecodeException;
 use Charm\Zstd\Zstd;
 use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
@@ -49,7 +48,7 @@ final class MaxSizeTest extends TestCase
         if ($n === 0) {
             $this->markTestSkipped('nothing to be one byte short of');
         }
-        $this->expectException(DecodeException::class);
+        $this->expectException(\UnexpectedValueException::class);
         $this->expectExceptionMessageMatches('/limit/');
         Zstd::decompress(self::fixture($name), $n - 1);
     }
@@ -57,7 +56,7 @@ final class MaxSizeTest extends TestCase
     public function testZeroLimit(): void
     {
         $this->assertSame('', Zstd::decompress(self::fixture('empty'), 0));
-        $this->expectException(DecodeException::class);
+        $this->expectException(\UnexpectedValueException::class);
         Zstd::decompress(Zstd::compress('x'), 0);
     }
 
@@ -74,14 +73,14 @@ final class MaxSizeTest extends TestCase
         try {
             Zstd::decompress($frame, 1000);
             $this->fail('no exception');
-        } catch (DecodeException $e) {
+        } catch (\UnexpectedValueException $e) {
             $this->assertStringContainsString('declares', $e->getMessage());
         }
         // without a limit the same frame is truncated, a different failure
         try {
             Zstd::decompress($frame);
             $this->fail('no exception');
-        } catch (DecodeException $e) {
+        } catch (\UnexpectedValueException $e) {
             $this->assertStringContainsString('Truncated', $e->getMessage());
         }
     }
@@ -94,7 +93,7 @@ final class MaxSizeTest extends TestCase
         try {
             Zstd::decompress($zst, 1000);
             $this->fail('no exception');
-        } catch (DecodeException $e) {
+        } catch (\UnexpectedValueException $e) {
             $this->assertStringContainsString('limit', $e->getMessage());
         }
     }
@@ -123,7 +122,7 @@ final class MaxSizeTest extends TestCase
         try {
             Zstd::decompress($bomb, 1 << 20);
             $this->fail('no exception');
-        } catch (DecodeException $e) {
+        } catch (\UnexpectedValueException $e) {
             $this->assertStringContainsString('limit', $e->getMessage());
         }
         $ms = (hrtime(true) - $t) / 1e6;
@@ -142,7 +141,7 @@ final class MaxSizeTest extends TestCase
         try {
             Zstd::decompress($bomb, 2 * 131072 + 5);
             $this->fail('no exception');
-        } catch (DecodeException) {
+        } catch (\UnexpectedValueException) {
         }
         $this->assertLessThan(3 * 131072 * 2 + (1 << 20), memory_get_peak_usage() - $base);
         // exactly at a block boundary passes
@@ -164,7 +163,7 @@ final class MaxSizeTest extends TestCase
         try {
             Zstd::decompress($bomb, 3 << 20);
             $this->fail('no exception');
-        } catch (DecodeException $e) {
+        } catch (\UnexpectedValueException $e) {
             $this->assertStringContainsString('limit', $e->getMessage());
         }
         $this->assertLessThan(1000, (hrtime(true) - $t) / 1e6);
@@ -175,7 +174,7 @@ final class MaxSizeTest extends TestCase
     {
         $a = Zstd::compress(str_repeat('a', 1000));
         $this->assertSame(2000, strlen(Zstd::decompress($a . $a, 2000)));
-        $this->expectException(DecodeException::class);
+        $this->expectException(\UnexpectedValueException::class);
         Zstd::decompress($a . $a, 1999);
     }
 
@@ -183,7 +182,7 @@ final class MaxSizeTest extends TestCase
     {
         $zst = self::fixture('level3');
         $zst[strlen($zst) - 1] = chr(ord($zst[strlen($zst) - 1]) ^ 1);
-        $this->expectException(DecodeException::class);
+        $this->expectException(\UnexpectedValueException::class);
         $this->expectExceptionMessageMatches('/checksum/');
         Zstd::decompress($zst, 10000000);
     }

@@ -22,7 +22,7 @@ final class Inputs
             'mixed' => self::mixed(),
             'skew' => self::skewed(120000, 21, 24),
             'lits' => self::noRepeats(3000, 22, 40),
-            default => throw new \InvalidArgumentException("Unknown input '$name'"),
+            default => throw new \ValueError("Unknown input '$name'"),
         };
     }
 

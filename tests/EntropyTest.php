@@ -17,13 +17,13 @@ final class EntropyTest extends TestCase
 {
     private static function literals(string $lit): string
     {
-        $m = new \ReflectionMethod(Zstd::class, 'encodeLiterals');
+        $m = new \ReflectionMethod(\Charm\Zstd\Internal\Engine::class, 'encodeLiterals');
         return $m->invoke(null, $lit, strlen($lit));
     }
 
     private static function private(string $name, mixed ...$args): mixed
     {
-        return (new \ReflectionMethod(Zstd::class, $name))->invoke(null, ...$args);
+        return (new \ReflectionMethod(\Charm\Zstd\Internal\Engine::class, $name))->invoke(null, ...$args);
     }
 
     /** A frame whose only block is the literals section plus "no sequences": decodes to $lit. */
