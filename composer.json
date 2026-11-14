@@ -1,0 +1,38 @@
+{
+    "name": "charm/zstd",
+    "description": "A Zstandard (RFC 8878) decoder and a simple encoder in plain PHP: no extension needed, with a size limit for untrusted input.",
+    "type": "library",
+    "license": "MIT",
+    "authors": [
+        {
+            "name": "Frode Børli",
+            "email": "frode@ennerd.com"
+        }
+    ],
+    "keywords": [
+        "zstd",
+        "zstandard",
+        "compression",
+        "decompression",
+        "rfc8878"
+    ],
+    "require": {
+        "php": ">=8.2"
+    },
+    "require-dev": {
+        "phpunit/phpunit": "^11.5"
+    },
+    "autoload": {
+        "psr-4": {
+            "Charm\\Zstd\\": "src/"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "Charm\\Zstd\\Tests\\": "tests/"
+        }
+    },
+    "config": {
+        "sort-packages": true
+    }
+}
